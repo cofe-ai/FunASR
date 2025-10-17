@@ -1,4 +1,4 @@
-
+. /workspace/FunASR/.venv/bin/activate
 download_model_dir="/workspace/models"
 model_dir="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx"
 vad_dir="iic/speech_fsmn_vad_zh-cn-16k-common-onnx"
@@ -38,5 +38,5 @@ $cmd_path/${cmd}  \
   --port ${port} \
   --certfile  "${certfile}" \
   --keyfile "${keyfile}" \
-  --hotword "${hotword}" &
+  --hotword "${hotword}"
 
