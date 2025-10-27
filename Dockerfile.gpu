@@ -1,0 +1,5 @@
+FROM registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-gpu-0.2.1
+COPY runtime/run_server_gpu.sh /workspace/FunASR/runtime/run_server_gpu.sh
+WORKDIR /workspace/FunASR/runtime
+EXPOSE 10095
+CMD ["bash", "run_server_gpu.sh", "--certfile", "0"]
