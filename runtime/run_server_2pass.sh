@@ -40,5 +40,5 @@ $cmd_path/${cmd}  \
   --port ${port} \
   --certfile  "${certfile}" \
   --keyfile "${keyfile}" \
-  --hotword "${hotword}" &
+  --hotword "${hotword}"
 
