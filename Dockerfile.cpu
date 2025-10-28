@@ -2,4 +2,4 @@ FROM registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-onl
 COPY runtime/run_server_2pass.sh /workspace/FunASR/runtime/run_server_2pass.sh
 WORKDIR /workspace/FunASR/runtime
 EXPOSE 10095
-CMD ["bash", "run_server_2pass.sh", "--certfile", "0"]
+CMD ["bash", "run_server_2pass.sh"]
