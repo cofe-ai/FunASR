@@ -193,7 +193,7 @@ def _merge_timestamp_units(text, words, timestamps, punc_array, punc_model):
         return None
 
     def normalize(value):
-        return "".join(value.split()).casefold()
+        return "".join(value.split()).replace("▁", "").casefold()
 
     if len(words) != len(timestamps):
         return None
@@ -542,6 +542,12 @@ class AutoModel:
         if kwargs["model"] in {"silero-vad", "silero_vad"}:
             kwargs.setdefault("model_conf", {})
             kwargs["model"] = "SileroVad"
+        if kwargs["model"] in {
+            "MOSS-Transcribe-Diarize",
+            "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+        }:
+            kwargs.setdefault("model_conf", {})
+            kwargs.setdefault("model_path", kwargs["model"])
         if "model_conf" not in kwargs:
             logging.info("download models from model hub: {}".format(kwargs.get("hub", "ms")))
             kwargs = download_model(**kwargs)
@@ -1164,6 +1170,7 @@ class AutoModel:
                             {
                                 "start": vadsegment[0],
                                 "end": vadsegment[1],
+                                "text": rest["text"],
                                 "sentence": rest["text"],
                                 "timestamp": ts,
                             }

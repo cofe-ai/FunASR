@@ -99,22 +99,12 @@ Whisper は単一モデルですが、**FunASR はツールキット**です—�
 
 ## 最新情報
 
-- 2026/08/14：**v1.4.2 を PyPI に公開** — 句読点モデルの token 境界がタイムスタンプ付き ASR 単語の内部にある場合でも、文アラインメントが字幕分割を正しく保持するようになりました。分散学習では、各勾配累積 window の最後の microbatch で DDP/FSDP 勾配を同期し、解決済み設定から DeepSpeed/FSDP mode を初期化します。対応する GitHub ソース tag には llama.cpp SRT 出力と v0.2.0 の AMD Vulkan submission 更新も含まれます。インストール：`python -m pip install -U "funasr==1.4.2"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.4.2)
-- 2026/08/11：**llama.cpp runtime v0.2.0** — upstream llama.cpp を `803b7fca` に固定し、同一のテスト済み workflow から SHA-256 付きの Linux、macOS、Windows 向け 9 archive を公開しました。Fun-ASR-Nano、SenseVoice、Paraformer CLI は SRT 字幕を出力でき、Vulkan 起動時には AMD 向け診断と CPU fallback を案内します。AMD Windows Vulkan crash の修正は、報告者の実機確認待ちです。[ダウンロード一覧と quickstart →](https://www.funasr.com/en/deploy/llama-cpp.html) · [Release →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.2.0)
-- 2026/08/04：**v1.4.1 を PyPI に公開** — Hugging Face の `paraformer-en` エイリアスが、誤って中国語モデルをダウンロードせず、公式の英語 checkpoint を解決するようになりました。このパッチには Fun-ASR-Nano の LoRA 微調整と、より安全な checkpoint 処理も含まれます。対応する GitHub ソース tag には JSONL タイムスタンプ出力、SenseVoice TensorRT デプロイ、OpenClaw リアルタイム文字起こし連携も含まれます。インストール：`python -m pip install -U "funasr==1.4.1"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.4.1)
-- 2026/07/31：**v1.4.0 を PyPI に公開** — `AutoModel` はモデルのダウンロード前に、よくある `vda_model` のスペルミスを拒否し、正しい `vad_model` を案内します。これにより、VAD に依存する分割、話者処理、`sentence_info` が気付かないまま無効になることを防ぎます。GitHub のソースリリースでは legacy WebSocket ファイルランタイムも更新され、クライアントは明示的な入力終了応答を待ち、サーバーは保留中の offline、online、2pass 音声を処理してから完了またはエラーを返します。Python パッケージのインストール：`python -m pip install -U "funasr==1.4.0"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.4.0)
-- 2026/07/27：**v1.3.30 を PyPI に公開** — WAV、MP3、FLAC、OGG、MP4/M4A、WebM などのコンテナ形式の音声バイト列を raw PCM と誤認せず、対応するコーデックでデコードするようになりました。OpenAI 互換レスポンスは話者ラベルを保持し、句読点が一致しない場合も VAD 区間時刻を保持します。信頼済みブラウザクライアント向け CORS と、vLLM の 30 秒 VAD 上限にも対応しました。GitHub Release には、デスクトップ／サーバー向け 9 ターゲットの最新 llama.cpp ビルドも同梱しています。インストール：`python -m pip install -U "funasr==1.3.30"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.3.30)
-- 2026/07/24：**v1.3.29 hotfix が PyPI に公開** — SenseVoice の長時間音声推論で word timestamp と句読点モデルがない場合でも、各 VAD 音声区間を `sentence_info` で返すようになりました。字幕クライアントは、ゼロ長またはメディア全体を覆う一つの cue ではなく、認識テキストと実際のミリ秒単位の開始・終了時刻を取得できます。インストール：`python -m pip install -U "funasr==1.3.29"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.3.29)
-- 2026/07/24：**v1.3.28 hotfix が PyPI に公開** — VAD で確定した realtime WebSocket の最終結果が短い接頭辞、反復 hallucination、または decode 例外へ退化した場合、現在の音声区間を連続して完全に覆う clean partial を保持します。短い STOP tail、VAD finalize、話者処理も同じ信頼できる完了経路に統一しました。SenseVoice 字幕は rich tag、句読点、word/BPE timestamp を正しく整列し、中国語を一つの cue に潰さず、英語表記も保持します。インストール：`python -m pip install -U "funasr==1.3.28"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.3.28)
-- 2026/07/24：**v1.3.27 が PyPI に公開** — OpenAI 互換サーバーが `verbose_json` で SenseVoice の検出言語を返し、vLLM fallback 後はキャッシュ済み Fun-ASR-Nano `AutoModel` を再利用します。vLLM/VAD 初期化と fallback の両方が失敗した場合は、半初期化状態を残さず、後続リクエストで再試行できます。インストール：`python -m pip install -U "funasr==1.3.27"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.3.27)
-- 2026/07/23：**v1.3.26 が PyPI に公開** — `funasr-server --model fun-asr-nano --hub ms` は ModelScope hub 指定を vLLM 経路と AutoModel fallback の両方で尊重します。インストール：`python -m pip install -U "funasr==1.3.26"`。[Release →](https://github.com/modelscope/FunASR/releases/tag/v1.3.26)
-- 2026/07/23：**llama.cpp runtime v0.1.9** — Windows Vulkan 向け `funasr-llamacpp-windows-x64-vulkan.zip` を追加。現在の AMD、Intel、NVIDIA Vulkan ドライバーで SenseVoiceSmall を単独実行できます。Linux Vulkan、Windows CUDA、CPU/AVX2、Linux arm64、macOS arm64 も引き続き提供します。[Release →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.1.9)
-- 2026/07/22：**llama.cpp runtime v0.1.8** — Linux Vulkan tarball と Windows CUDA zip を含む CPU/エッジ向け GGUF ランタイム。現在のダウンロードと手順：[funasr.com/deploy/llama-cpp](https://www.funasr.com/en/deploy/llama-cpp.html) · [Release →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.1.8)
-- 2026/05/24：**v1.3.3** — `funasr-server` CLI、OpenAI互換API、MCPサーバー。`pip install --upgrade funasr`
-- 2026/05/20：Qwen3-ASR (0.6B/1.7B) 追加 — 52言語対応。
-- 2026/05/20：GLM-ASR-Nano (1.5B) 追加 — 17言語、方言対応。
-- 2026/05/19：Fun-ASR-NanoとSenseVoiceは、VADおよびCAM++と組み合わせて話者分離パイプラインを構成できます。
-- 2025/12/15：[Fun-ASR-Nano-2512](https://github.com/QwenAudio/Fun-ASR) — 中・英・日と中国語方言に対応。
+- **FunASR 1.4.11** は現在の PyPI 安定版です。実際のモデル timestamp を保持しながら、多言語字幕の可読性を改善しました。更新：`python -m pip install -U "funasr==1.4.11"`。[Release ->](https://github.com/modelscope/FunASR/releases/tag/v1.4.11)
+- **MOSS-Transcribe-Diarize 連携**では、長時間音声の ASR、timestamp、匿名 speaker label を 1 回の生成で処理でき、外部 VAD や speaker pipeline は不要です。FunASR は local Transformers と既存の vLLM/SGLang service に対応し、FunClip は speaker 付き SRT と clip を出力できます。[Deployment guide ->](./docs/moss_transcribe_diarize.md)
+- **llama.cpp runtime v0.2.6** は Linux、macOS、Windows の 10 target 向け検証済み archive を提供し、RTX 30/40 と RTX 50 向け Windows CUDA package を分けて用意しています。[Download matrix ->](https://www.funasr.com/en/deploy/llama-cpp.html) · [Release ->](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.2.6)
+- **Realtime serving の高速化と安定化**：互換 WebSocket session を直列処理せず batch 化し、decode queue によって正常な session を default で切断しないようにしました。H100 regression workload では 12-client STOP p95 が 19.8 秒から 0.4 秒に短縮しました。[Production guide ->](./docs/vllm_guide.md)
+
+> 完全な変更履歴と download asset は [GitHub Releases](https://github.com/modelscope/FunASR/releases) を参照してください。
 
 ---
 

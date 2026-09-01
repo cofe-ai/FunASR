@@ -18,6 +18,18 @@ from typing import Any
 RUNTIME_SECTION_HEADING = "## Runtime downloads"
 RUNTIME_SECTION_START = "<!-- funasr-runtime-downloads:start -->"
 RUNTIME_SECTION_END = "<!-- funasr-runtime-downloads:end -->"
+EXPECTED_RUNTIME_ASSET_NAMES = {
+    "funasr-llamacpp-linux-arm64.tar.gz",
+    "funasr-llamacpp-linux-x64-avx2.tar.gz",
+    "funasr-llamacpp-linux-x64-vulkan.tar.gz",
+    "funasr-llamacpp-linux-x64.tar.gz",
+    "funasr-llamacpp-macos-arm64.tar.gz",
+    "funasr-llamacpp-windows-x64-avx2.zip",
+    "funasr-llamacpp-windows-x64-cuda-blackwell.zip",
+    "funasr-llamacpp-windows-x64-cuda.zip",
+    "funasr-llamacpp-windows-x64-vulkan.zip",
+    "funasr-llamacpp-windows-x64.zip",
+}
 
 
 def run_gh_json(args: list[str]) -> Any:
@@ -47,6 +59,8 @@ def platform_label(asset_name: str) -> str:
         return "macOS arm64"
     if "windows-x64-vulkan" in asset_name:
         return "Windows x64 Vulkan"
+    if "windows-x64-cuda-blackwell" in asset_name:
+        return "Windows x64 CUDA Blackwell (sm_120)"
     if "windows-x64-cuda" in asset_name:
         return "Windows x64 CUDA"
     if "windows-x64-avx2" in asset_name:
@@ -119,8 +133,14 @@ def runtime_assets(release: dict[str, Any]) -> list[dict[str, Any]]:
     selected = [
         asset for asset in assets if asset["name"].startswith("funasr-llamacpp-")
     ]
-    if not selected:
-        raise RuntimeError(f"{release['tagName']} has no llama.cpp assets")
+    actual_names = {asset["name"] for asset in selected}
+    if actual_names != EXPECTED_RUNTIME_ASSET_NAMES:
+        missing = sorted(EXPECTED_RUNTIME_ASSET_NAMES - actual_names)
+        unexpected = sorted(actual_names - EXPECTED_RUNTIME_ASSET_NAMES)
+        raise RuntimeError(
+            f"{release['tagName']} does not contain the exact runtime asset matrix; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
     return selected
 
 

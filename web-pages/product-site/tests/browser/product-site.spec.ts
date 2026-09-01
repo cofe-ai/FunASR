@@ -135,14 +135,19 @@ for (const viewport of [
   { name: 'mobile', width: 390, height: 844 },
   { name: 'desktop', width: 1440, height: 900 },
 ]) {
-  test(`llama.cpp v0.2.0 download matrix is stable at ${viewport.name}`, async ({ page }, testInfo) => {
+  test(`llama.cpp v0.2.6 download matrix is stable at ${viewport.name}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto('/deploy/llama-cpp.html');
 
     const section = page.locator('[data-section="downloads"]');
-    await expect(section.locator('[data-download-asset]')).toHaveCount(9);
-    await expect(section.locator('a[href*="runtime-llamacpp-v0.2.0"]')).toHaveCount(9);
+    await expect(section.locator('[data-download-asset]')).toHaveCount(10);
+    await expect(section.locator('a[href*="runtime-llamacpp-v0.2.6"]')).toHaveCount(10);
+    await expect(page.getByText('Blackwell', { exact: false }).first()).toBeVisible();
     await expect(page.getByText('Windows AMD Vulkan', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('resolving buffer type', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('model ready', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('graph allocated', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('compute starting', { exact: false }).first()).toBeVisible();
 
     await section.evaluate((node) => node.scrollIntoView({ block: 'start' }));
 
@@ -165,6 +170,41 @@ for (const viewport of [
 
     await page.screenshot({
       path: testInfo.outputPath(`llama-cpp-downloads-${viewport.name}.png`),
+      fullPage: true,
+    });
+  });
+}
+
+for (const viewport of [
+  { name: 'mobile', width: 390, height: 844 },
+  { name: 'desktop', width: 1440, height: 900 },
+]) {
+  test(`MOSS AutoModel deployment is stable at ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/deploy/moss-transcribe-diarize.html');
+
+    await expect(page.locator('h1')).toHaveText('MOSS 统一转写与说话人分离');
+    await expect(page.getByText('FunASR AutoModel', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('OpenMOSS', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('sentence_info', { exact: false }).first()).toBeVisible();
+    await expect(page.getByText('diarized_json', { exact: false }).first()).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/modelscope/FunASR/pull/3558"]')).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/vllm-project/vllm/pull/48543"]')).toBeVisible();
+    await expect(page.locator('a[href*="vllm-project/recipes/blob/d3f3136"]')).toBeVisible();
+    await expect(page.locator('a[href="/en/deploy/moss-transcribe-diarize.html"]')).toBeVisible();
+
+    const layout = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      commandWidths: [...document.querySelectorAll<HTMLElement>('.command-block')].map((node) => ({
+        parent: node.parentElement?.getBoundingClientRect().width ?? 0,
+        width: node.getBoundingClientRect().width,
+      })),
+    }));
+    expect(layout.overflow).toBeLessThanOrEqual(1);
+    expect(layout.commandWidths.every(({ parent, width }) => width <= parent + 1)).toBe(true);
+
+    await page.screenshot({
+      path: testInfo.outputPath(`moss-automodel-${viewport.name}.png`),
       fullPage: true,
     });
   });
@@ -293,12 +333,105 @@ for (const viewport of [
   });
 }
 
+for (const viewport of [
+  { name: 'mobile', width: 390, height: 844 },
+  { name: 'desktop', width: 1440, height: 900 },
+]) {
+  test(`GPT-SoVITS dependency contract is stable at ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+
+    for (const route of ['/ecosystem.html', '/en/ecosystem.html']) {
+      await page.goto(route);
+      const card = page.locator('.card').filter({ hasText: 'GPT-SoVITS' });
+
+      await expect(card).toHaveCount(1);
+      await expect(card).toContainText('Transformers >=4.51,<5');
+      await expect(card.locator('.card-tag', { hasText: 'Qwen3' })).toBeVisible();
+      await expect(card.locator('a[href="https://github.com/RVC-Boss/GPT-SoVITS/pull/2824"]')).toBeVisible();
+
+      const layout = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      }));
+      expect(layout.overflow).toBeLessThanOrEqual(1);
+    }
+
+    await page.screenshot({
+      path: testInfo.outputPath(`gpt-sovits-ecosystem-${viewport.name}.png`),
+      fullPage: true,
+    });
+  });
+}
+
 test('reduced motion disables smooth scrolling', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/en/');
   const behavior = await page.locator('html').evaluate((node) => getComputedStyle(node).scrollBehavior);
   expect(behavior).toBe('auto');
 });
+
+for (const viewport of [
+  { name: 'mobile', width: 390, height: 844 },
+  { name: 'desktop', width: 1440, height: 900 },
+]) {
+  test(`FunClip v2.2.0 MOSS release discovery is stable at ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    for (const release of [
+      {
+        language: 'zh',
+        index: '/blog/',
+        article: '/blog/funclip-v2-2-0-moss-speaker-clipping.html',
+        previous: '/blog/funasr-v1-4-5-pypi-llama-cpp-release.html',
+      },
+      {
+        language: 'en',
+        index: '/en/blog/',
+        article: '/en/blog/funclip-v2-2-0-moss-speaker-clipping.html',
+        previous: '/en/blog/funasr-v1-4-5-pypi-llama-cpp-release.html',
+      },
+    ]) {
+      await page.goto(release.index);
+      await expect(
+        page.locator(`.launch-feature a[href="${release.article}"]`),
+      ).toBeVisible();
+      const history = page.locator('.previous-release .post-card');
+      await expect(history).toHaveCount(4);
+      await expect(
+        page.locator(`.previous-release a[href="${release.previous}"]`),
+      ).toBeVisible();
+      const indexLayout = await history.evaluateAll((cards) => ({
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        rows: new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size,
+      }));
+      expect(indexLayout.overflow).toBeLessThanOrEqual(1);
+      expect(indexLayout.rows).toBe(viewport.name === 'mobile' ? 4 : 1);
+
+      await page.goto(release.article);
+      await expect(page.locator('h1')).toContainText('FunClip v2.2.0');
+      await expect(page.getByText('OpenMOSS-Team/MOSS-Transcribe-Diarize', { exact: false }).first()).toBeVisible();
+      await expect(page.getByText('/v1/audio/transcriptions', { exact: false }).first()).toBeVisible();
+      await expect(page.locator('img[src="/img/funclip-v2-1-0-interface.jpg"]')).toBeVisible();
+
+      const articleLayout = await page.evaluate(() => {
+        const navigation = document.querySelector<HTMLElement>('nav.nav');
+        const heading = document.querySelector<HTMLElement>('h1');
+        return {
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          navigationBottom: navigation?.getBoundingClientRect().bottom ?? 0,
+          headingTop: heading?.getBoundingClientRect().top ?? 0,
+        };
+      });
+      expect(articleLayout.overflow).toBeLessThanOrEqual(1);
+      expect(articleLayout.headingTop).toBeGreaterThanOrEqual(articleLayout.navigationBottom + 16);
+
+      await page.screenshot({
+        path: testInfo.outputPath(
+          `funclip-v2.2.0-moss-${release.language}-${viewport.name}.png`,
+        ),
+        fullPage: true,
+      });
+    }
+  });
+}
 
 test('llama.cpp blog heading clears fixed navigation on mobile', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });

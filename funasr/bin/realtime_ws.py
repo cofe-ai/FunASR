@@ -12,9 +12,13 @@ Features:
 
 import asyncio
 from collections import deque
+import copy
+from difflib import SequenceMatcher
 import json
 import logging
 import os
+import queue
+import threading
 import time
 import argparse
 import numpy as np
@@ -34,6 +38,235 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
+class _BatchRequest:
+    def __init__(self, inputs, kwargs):
+        self.inputs = inputs
+        self.kwargs = kwargs
+        self.enqueued_at = time.monotonic()
+        self.event = threading.Event()
+        self.result = None
+        self.error = None
+
+
+class ThreadSafeGenerateModel:
+    """Protect mutable AutoModel runtime configuration across session threads."""
+
+    def __init__(self, model):
+        self.model = model
+        self.lock = threading.Lock()
+
+    def generate(self, *args, **kwargs):
+        with self.lock:
+            return self.model.generate(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
+
+
+class RealtimeBatchingEngine:
+    """Serialize the shared engine while batching compatible session requests."""
+
+    def __init__(
+        self, engine, batch_wait_ms=10.0, max_batch_size=16, log_profile=False
+    ):
+        self.engine = engine
+        self._engine = getattr(engine, "_engine", engine)
+        self.batch_wait_s = max(0.0, float(batch_wait_ms)) / 1000.0
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.log_profile = bool(log_profile)
+        self.requests = queue.Queue()
+        self.pending_request = None
+        self.worker = threading.Thread(
+            target=self._run, name="funasr-realtime-batcher", daemon=True
+        )
+        self.worker.start()
+
+    @staticmethod
+    def _freeze(value):
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    (key, RealtimeBatchingEngine._freeze(item))
+                    for key, item in sorted(value.items())
+                ),
+            )
+        if isinstance(value, list):
+            return (
+                "list",
+                tuple(RealtimeBatchingEngine._freeze(item) for item in value),
+            )
+        if isinstance(value, tuple):
+            return (
+                "tuple",
+                tuple(RealtimeBatchingEngine._freeze(item) for item in value),
+            )
+        if isinstance(value, set):
+            return (
+                "set",
+                frozenset(RealtimeBatchingEngine._freeze(item) for item in value),
+            )
+        try:
+            hash(value)
+        except TypeError:
+            return ("identity", id(value))
+        return ("value", type(value), value)
+
+    def generate(self, inputs, **kwargs):
+        request_inputs = list(inputs) if isinstance(inputs, (list, tuple)) else [inputs]
+        if not request_inputs:
+            return []
+        if len(request_inputs) > self.max_batch_size:
+            raise ValueError(
+                f"Realtime decode request has {len(request_inputs)} inputs; "
+                f"the configured maximum is {self.max_batch_size}"
+            )
+        if not self.worker.is_alive():
+            raise RuntimeError("Realtime decode batch worker is not running")
+
+        request = _BatchRequest(request_inputs, dict(kwargs))
+        self.requests.put(request)
+        while not request.event.wait(timeout=1.0):
+            if not self.worker.is_alive():
+                raise RuntimeError("Realtime decode batch worker stopped unexpectedly")
+        if request.error is not None:
+            raise request.error
+        return request.result
+
+    def _collect_batch(self, first):
+        batch = [first]
+        sample_count = len(first.inputs)
+        deadline = time.monotonic() + self.batch_wait_s
+        while sample_count < self.max_batch_size:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                request = self.requests.get(timeout=timeout)
+            except queue.Empty:
+                break
+            if sample_count + len(request.inputs) > self.max_batch_size:
+                self.pending_request = request
+                break
+            batch.append(request)
+            sample_count += len(request.inputs)
+        return batch
+
+    def _run(self):
+        while True:
+            first = self.pending_request
+            if first is None:
+                first = self.requests.get()
+            else:
+                self.pending_request = None
+            requests = [first]
+            try:
+                requests = self._collect_batch(first)
+            except Exception as error:
+                logger.exception("Realtime batch collection failed")
+                for request in requests:
+                    request.error = error
+                    request.event.set()
+                continue
+
+            groups = {}
+            for request in requests:
+                try:
+                    key = self._freeze(request.kwargs)
+                except Exception as error:
+                    request.error = error
+                    request.event.set()
+                    continue
+                groups.setdefault(key, []).append(request)
+            for group in groups.values():
+                try:
+                    self._generate_group(group)
+                except Exception as error:
+                    logger.exception("Realtime batch result distribution failed")
+                    for request in group:
+                        if request.event.is_set():
+                            continue
+                        request.error = error
+                        request.event.set()
+
+    def _generate_group(self, requests):
+        inputs = [item for request in requests for item in request.inputs]
+        started_at = time.monotonic()
+        try:
+            results = self.engine.generate(inputs, **requests[0].kwargs)
+            if len(results) != len(inputs):
+                raise RuntimeError(
+                    "Realtime batch result count does not match the input count: "
+                    f"{len(results)} != {len(inputs)}"
+                )
+        except Exception as error:
+            if len(requests) > 1 and not isinstance(
+                error, torch.cuda.OutOfMemoryError
+            ):
+                logger.warning(
+                    "Realtime decode batch failed; retrying %d requests separately: %s",
+                    len(requests),
+                    error,
+                )
+                for request in requests:
+                    self._generate_group([request])
+                return
+            for request in requests:
+                request.error = error
+            for request in requests:
+                request.event.set()
+            return
+
+        if self.log_profile:
+            queue_waits_ms = sorted(
+                (started_at - request.enqueued_at) * 1000 for request in requests
+            )
+            midpoint = len(queue_waits_ms) // 2
+            if len(queue_waits_ms) % 2:
+                queue_p50_ms = queue_waits_ms[midpoint]
+            else:
+                queue_p50_ms = (
+                    queue_waits_ms[midpoint - 1] + queue_waits_ms[midpoint]
+                ) / 2
+            audio_seconds = [
+                item.shape[-1] / 16000.0
+                for item in inputs
+                if isinstance(item, (np.ndarray, torch.Tensor)) and item.ndim > 0
+            ]
+            logger.info(
+                "Realtime decode profile: requests=%d samples=%d "
+                "audio_sec_total=%.3f audio_sec_min=%.3f audio_sec_max=%.3f "
+                "queue_ms_p50=%.3f queue_ms_max=%.3f engine_ms=%.3f",
+                len(requests),
+                len(inputs),
+                sum(audio_seconds),
+                min(audio_seconds, default=0.0),
+                max(audio_seconds, default=0.0),
+                queue_p50_ms,
+                queue_waits_ms[-1],
+                (time.monotonic() - started_at) * 1000,
+            )
+
+        offset = 0
+        for request in requests:
+            end = offset + len(request.inputs)
+            request.result = []
+            for local_index, (item, result) in enumerate(
+                zip(request.inputs, results[offset:end])
+            ):
+                result_key = result.get("key") if isinstance(result, dict) else None
+                if (
+                    not isinstance(item, str)
+                    and isinstance(result_key, str)
+                    and result_key.startswith("sample_")
+                ):
+                    result = dict(result)
+                    result["key"] = f"sample_{local_index}"
+                request.result.append(result)
+            offset = end
+            request.event.set()
+
+
 def _normalize_transcript_with_positions(text):
     normalized = []
     source_positions = []
@@ -48,6 +281,22 @@ def _normalize_transcript_with_positions(text):
 
 def _normalize_transcript(text):
     return _normalize_transcript_with_positions(text)[0]
+
+
+def _is_supported_transcript_extension(candidate, reference):
+    candidate, hallucinated = detect_and_fix_hallucination(candidate)
+    if hallucinated:
+        return False
+    candidate_cmp = _normalize_transcript(candidate)
+    reference_cmp = _normalize_transcript(reference)
+    if len(candidate_cmp) - len(reference_cmp) < 4:
+        return False
+    common_prefix_len = 0
+    for candidate_char, reference_char in zip(candidate_cmp, reference_cmp):
+        if candidate_char != reference_char:
+            break
+        common_prefix_len += 1
+    return common_prefix_len >= max(8, (len(reference_cmp) * 3) // 4)
 
 
 def _merge_overlapping_transcripts(existing, incoming):
@@ -482,6 +731,11 @@ class RealtimeASRSession:
         self.segment_partial_start_ms = 0
         self.segment_partial_end_ms = 0
         self.segment_partial_stable_count = 0
+        self.segment_partial_observation_count = 0
+        self.segment_best_partial_text = ""
+        self.segment_best_partial_start_ms = 0
+        self.segment_best_partial_end_ms = 0
+        self.segment_best_partial_observation_count = 0
         self.last_decode_samples = 0
         self.locked_sentences = []
         self.prev_seg_text = ""
@@ -539,11 +793,17 @@ class RealtimeASRSession:
         self.audio_buffer = np.array([], dtype=np.float32)
         self.audio_buffer_start_sample = self.total_samples
 
-    def _reset_partial_history(self):
+    def _reset_partial_history(self, preserve_best=False):
         self.segment_partial_text = ""
         self.segment_partial_start_ms = 0
         self.segment_partial_end_ms = 0
         self.segment_partial_stable_count = 0
+        self.segment_partial_observation_count = 0
+        if not preserve_best:
+            self.segment_best_partial_text = ""
+            self.segment_best_partial_start_ms = 0
+            self.segment_best_partial_end_ms = 0
+            self.segment_best_partial_observation_count = 0
 
     def _record_partial_text(self, text, start_ms, hallucinated=False):
         """Build a confidence-bearing transcript across overlapping partial windows."""
@@ -551,20 +811,33 @@ class RealtimeASRSession:
         self.last_partial_end_ms = end_ms
         self.last_partial_eligible = bool(text.strip()) and not hallucinated
         if not text.strip() or hallucinated:
-            self._reset_partial_history()
+            self._reset_partial_history(preserve_best=hallucinated)
             return
 
         start_ms = int(start_ms)
         incoming_norm = _normalize_transcript(text)
+        best_norm = _normalize_transcript(self.segment_best_partial_text)
+        if not self.segment_best_partial_text or start_ms != self.segment_best_partial_start_ms:
+            self.segment_best_partial_text = text
+            self.segment_best_partial_start_ms = start_ms
+            self.segment_best_partial_end_ms = end_ms
+            self.segment_best_partial_observation_count = 1
+        else:
+            self.segment_best_partial_observation_count += 1
+            if len(incoming_norm) > len(best_norm):
+                self.segment_best_partial_text = text
+                self.segment_best_partial_end_ms = end_ms
         if not self.segment_partial_text:
             self.segment_partial_text = text
             self.segment_partial_start_ms = start_ms
             self.segment_partial_end_ms = end_ms
             self.segment_partial_stable_count = 1
+            self.segment_partial_observation_count = 1
             return
 
         history_norm = _normalize_transcript(self.segment_partial_text)
         if start_ms == self.segment_partial_start_ms:
+            self.segment_partial_observation_count += 1
             if incoming_norm == history_norm:
                 self.segment_partial_text = text
                 self.segment_partial_end_ms = end_ms
@@ -580,6 +853,7 @@ class RealtimeASRSession:
             self.segment_partial_start_ms = start_ms
             self.segment_partial_end_ms = end_ms
             self.segment_partial_stable_count = 1
+            self.segment_partial_observation_count = 1
             return
 
         if start_ms > self.segment_partial_end_ms:
@@ -587,6 +861,7 @@ class RealtimeASRSession:
             self.segment_partial_start_ms = start_ms
             self.segment_partial_end_ms = end_ms
             self.segment_partial_stable_count = 1
+            self.segment_partial_observation_count = 1
             return
 
         merged = _merge_overlapping_transcripts(self.segment_partial_text, text)
@@ -594,11 +869,13 @@ class RealtimeASRSession:
             self.segment_partial_text = merged
             self.segment_partial_end_ms = end_ms
             self.segment_partial_stable_count = 1
+            self.segment_partial_observation_count += 1
         else:
             self.segment_partial_text = text
             self.segment_partial_start_ms = start_ms
             self.segment_partial_end_ms = end_ms
             self.segment_partial_stable_count = 1
+            self.segment_partial_observation_count = 1
 
     def should_decode(self):
         threshold = self.first_chunk_samples if not self.first_decode_done else self.chunk_samples
@@ -796,6 +1073,71 @@ class RealtimeASRSession:
         partial_text = self._partial_fallback_candidate(
             seg, require_stable=not final_hallucinated
         )
+        long_segment_reason = ""
+        if not partial_text:
+            segment_duration_ms = max(0, int(seg[1]) - int(seg[0]))
+            decode_chunk_ms = int(self.chunk_samples * 1000 / self.sample_rate)
+            recent_partial = self.last_partial_text.strip()
+            recent_start_ms = self.last_partial_start_ms
+            recent_end_ms = self.last_partial_end_ms
+            recent_observations = self.segment_partial_observation_count
+            recent_eligible = self.last_partial_eligible
+            if len(_normalize_transcript(self.segment_best_partial_text)) > len(
+                _normalize_transcript(recent_partial)
+            ):
+                recent_partial = self.segment_best_partial_text.strip()
+                recent_start_ms = self.segment_best_partial_start_ms
+                recent_end_ms = self.segment_best_partial_end_ms
+                recent_observations = self.segment_best_partial_observation_count
+                recent_eligible = True
+            tail_gap_ms = int(seg[1]) - int(recent_end_ms)
+            recent_partial, recent_hallucinated = detect_and_fix_hallucination(
+                recent_partial
+            )
+            if (
+                segment_duration_ms >= 8000
+                and recent_eligible
+                and recent_observations >= 2
+                and int(recent_start_ms) == int(seg[0])
+                and 0 <= tail_gap_ms <= max(100, decode_chunk_ms * 2)
+                and recent_partial
+                and not recent_hallucinated
+            ):
+                final_cmp = _normalize_transcript(final_text)
+                recent_cmp = _normalize_transcript(recent_partial)
+                matcher = SequenceMatcher(None, final_cmp, recent_cmp, autojunk=False)
+                matching_blocks = matcher.get_matching_blocks()
+                matched_chars = sum(block.size for block in matching_blocks)
+                final_coverage = matched_chars / max(1, len(final_cmp))
+                first_match = next(
+                    (block for block in matching_blocks if block.size), None
+                )
+                starts_aligned = bool(
+                    first_match and first_match.a <= 1 and first_match.b <= 2
+                )
+                diverged = final_cmp != recent_cmp
+                catastrophically_short = (
+                    diverged
+                    and len(final_cmp) >= 1
+                    and len(recent_cmp) >= 24
+                    and len(recent_cmp) >= len(final_cmp) * 3
+                    and starts_aligned
+                    and matched_chars >= max(1, len(final_cmp) // 2)
+                )
+                tail_regressed = (
+                    diverged
+                    and len(final_cmp) >= 16
+                    and len(recent_cmp) - len(final_cmp) >= 4
+                    and starts_aligned
+                    and final_coverage >= 0.75
+                )
+                if catastrophically_short or tail_regressed:
+                    partial_text = recent_partial
+                    long_segment_reason = (
+                        "catastrophically short"
+                        if catastrophically_short
+                        else "tail-regressed"
+                    )
         if not partial_text:
             return final_text
         partial_text, partial_hallucinated = detect_and_fix_hallucination(partial_text)
@@ -812,12 +1154,15 @@ class RealtimeASRSession:
         use_partial = (
             (final_hallucinated and not partial_hallucinated)
             or truncated_prefix
+            or bool(long_segment_reason)
         )
         if use_partial and partial_cmp:
-            reason = "hallucinated" if final_hallucinated else "truncated"
+            reason = long_segment_reason or (
+                "hallucinated" if final_hallucinated else "truncated"
+            )
             logger.warning(
                 "Completed segment [%d-%dms] decode was %s; "
-                "keeping the latest aligned partial (%d -> %d chars)",
+                "keeping an aligned observed partial (%d -> %d chars)",
                 int(seg[0]), int(seg[1]), reason, len(final_text), len(partial_text),
             )
             return partial_text
@@ -877,9 +1222,40 @@ class RealtimeASRSession:
             except Exception as e:
                 logger.error(f"Segment decode error: {e}")
 
+        decoded_text = text
         text = self._reconcile_completed_segment_text(
-            text, seg, decode_succeeded=decode_succeeded
+            decoded_text, seg, decode_succeeded=decode_succeeded
         )
+        retry_end_ms = min(int(self.last_partial_end_ms), int(seg[1]))
+        if (
+            decode_succeeded
+            and text != decoded_text
+            and int(seg[1]) - int(seg[0]) >= 8000
+            and int(seg[0]) < retry_end_ms < int(seg[1])
+        ):
+            retry_end_sample = min(
+                int(retry_end_ms * self.sample_rate / 1000), self.total_samples
+            )
+            retry_audio = self._slice_audio(start_sample, retry_end_sample)
+            if len(retry_audio) >= 1600:
+                try:
+                    retry_results = self.vllm_engine.generate(
+                        inputs=[torch.from_numpy(retry_audio).float()],
+                        hotwords=self.asr_kwargs.get("hotwords"),
+                        language=self.asr_kwargs.get("language"),
+                        max_new_tokens=512,
+                    )
+                    retry_text = retry_results[0]["text"] if retry_results else ""
+                    retry_text = _clean_asr_text(retry_text)
+                    if _is_supported_transcript_extension(retry_text, text):
+                        logger.warning(
+                            "Completed segment [%d-%dms] accepted an aligned "
+                            "boundary retry extension (%d -> %d chars)",
+                            int(seg[0]), int(seg[1]), len(text), len(retry_text),
+                        )
+                        text = retry_text
+                except Exception as error:
+                    logger.warning("Segment boundary retry failed: %s", error)
         text = _postprocess_result_text(text, self.asr_kwargs)
         self.prev_seg_text = text
         self._clear_completed_partial(seg)
@@ -950,12 +1326,18 @@ def load_models(args):
         from funasr.auto.auto_model_vllm import AutoModelVLLM
 
         logger.info(f"Loading ASR (vLLM): {args.model}")
-        _vllm_engine = AutoModelVLLM(
+        engine = AutoModelVLLM(
             model=args.model, hub=args.hub, device=args.device,
             dtype=getattr(args, 'dtype', 'bf16'),
             tensor_parallel_size=getattr(args, 'tensor_parallel_size', 1),
             gpu_memory_utilization=getattr(args, 'gpu_memory_utilization', 0.8),
             max_model_len=getattr(args, 'max_model_len', 2048),
+        )
+        _vllm_engine = RealtimeBatchingEngine(
+            engine,
+            batch_wait_ms=getattr(args, "decode_batch_wait_ms", 10.0),
+            max_batch_size=getattr(args, "decode_max_batch_size", 16),
+            log_profile=getattr(args, "log_decode_profile", False),
         )
 
         _asr_kwargs = {}
@@ -980,7 +1362,10 @@ def load_models(args):
         if getattr(args, "endpoint_mode", "server") == "server":
             logger.info("Loading VAD: fsmn-vad (streaming)")
             _vad_model = AutoModel(
-                model="fsmn-vad", device=args.device, disable_update=True
+                model="fsmn-vad",
+                device=getattr(args, "vad_device", "cpu"),
+                ncpu=getattr(args, "vad_ncpu", 1),
+                disable_update=True,
             )
         else:
             _vad_model = None
@@ -988,7 +1373,13 @@ def load_models(args):
 
         if getattr(args, "enable_spk", False):
             logger.info(f"Loading SPK: {args.spk_model}")
-            _spk_model = AutoModel(model=args.spk_model, device=args.device, disable_update=True)
+            _spk_model = ThreadSafeGenerateModel(
+                AutoModel(
+                    model=args.spk_model,
+                    device=args.device,
+                    disable_update=True,
+                )
+            )
         else:
             _spk_model = None
             logger.info("SPK disabled; use --enable-spk to include speaker diarization")
@@ -1003,15 +1394,34 @@ def create_speaker_tracker(spk_model, args):
     return HybridSpeakerTracker(spk_model, args.device)
 
 
-async def run_session_work(args, operation, *operation_args, **operation_kwargs):
-    """Run blocking session work off-loop without concurrent shared-model access."""
-    lock = getattr(args, "_session_work_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        args._session_work_lock = lock
+def create_vad(vad_model, args):
+    if getattr(args, "endpoint_mode", "server") == "client":
+        return ClientEndpointVAD()
 
-    async with lock:
-        return await asyncio.to_thread(operation, *operation_args, **operation_kwargs)
+    session_model = copy.copy(vad_model)
+    nested_model = getattr(vad_model, "model", None)
+    if nested_model is not None:
+        session_model.model = copy.copy(nested_model)
+        vad_opts = getattr(nested_model, "vad_opts", None)
+        if vad_opts is not None:
+            session_model.model.vad_opts = copy.deepcopy(vad_opts)
+    immutable_keys = getattr(vad_model, "_IMMUTABLE_KWARGS_KEYS", frozenset())
+    for name, config in getattr(vad_model, "__dict__", {}).items():
+        if not name.endswith("kwargs") or not isinstance(config, dict):
+            continue
+        session_config = {}
+        for key, value in config.items():
+            if key in immutable_keys or not isinstance(value, (dict, list, set)):
+                session_config[key] = value
+            else:
+                session_config[key] = copy.deepcopy(value)
+        setattr(session_model, name, session_config)
+    return DynamicStreamingVAD(session_model)
+
+
+async def run_session_work(_args, operation, *operation_args, **operation_kwargs):
+    """Run one session off-loop; shared ASR calls are serialized by the batcher."""
+    return await asyncio.to_thread(operation, *operation_args, **operation_kwargs)
 
 
 def log_session_stats(session):
@@ -1036,10 +1446,7 @@ def log_session_stats(session):
 async def handle_client(websocket, args):
     vllm_engine, asr_kwargs, vad_model, spk_model = load_models(args)
     endpoint_mode = getattr(args, "endpoint_mode", "server")
-    if endpoint_mode == "client":
-        vad = ClientEndpointVAD()
-    else:
-        vad = DynamicStreamingVAD(vad_model)
+    vad = create_vad(vad_model, args)
     spk_tracker = create_speaker_tracker(spk_model, args)
     session = RealtimeASRSession(
         vllm_engine,
@@ -1197,9 +1604,41 @@ def build_arg_parser():
     parser.add_argument("--model", type=str, default="FunAudioLLM/Fun-ASR-Nano-2512")
     parser.add_argument("--hub", type=str, default="ms", choices=["ms", "hf"])
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument(
+        "--vad-device",
+        type=str,
+        default="cpu",
+        help="Device for per-session streaming VAD; CPU avoids frequent GPU synchronization.",
+    )
+    parser.add_argument(
+        "--vad-ncpu",
+        type=int,
+        default=1,
+        help="CPU threads per streaming VAD session.",
+    )
     parser.add_argument("--use-context", action="store_true", default=True)
     parser.add_argument("--no-context", dest="use_context", action="store_false")
     parser.add_argument("--decode-interval", type=float, default=0.48)
+    parser.add_argument(
+        "--decode-batch-wait-ms",
+        type=float,
+        default=10.0,
+        help="Maximum time to collect compatible cross-session decodes into one batch.",
+    )
+    parser.add_argument(
+        "--decode-max-batch-size",
+        type=int,
+        default=16,
+        help="Maximum number of audio segments submitted in one batched decode.",
+    )
+    parser.add_argument(
+        "--log-decode-profile",
+        action="store_true",
+        help=(
+            "Log per-engine-batch request counts, audio durations, queue wait, "
+            "and engine latency for performance investigations."
+        ),
+    )
     parser.add_argument(
         "--endpoint-mode",
         choices=["server", "client"],
@@ -1241,8 +1680,16 @@ def build_arg_parser():
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--ws-ping-interval", type=float, default=20.0,
                         help="WebSocket ping interval in seconds; <=0 disables keepalive pings.")
-    parser.add_argument("--ws-ping-timeout", type=float, default=20.0,
-                        help="WebSocket ping timeout in seconds; <=0 disables ping timeout.")
+    parser.add_argument(
+        "--ws-ping-timeout",
+        type=float,
+        default=0.0,
+        help=(
+            "WebSocket ping timeout in seconds; disabled by default because "
+            "decode/queue backpressure can delay pong handling. Set a positive "
+            "value only above the measured worst-case delay."
+        ),
+    )
     parser.add_argument("--ws-close-timeout", type=float, default=10.0,
                         help="WebSocket close handshake timeout in seconds.")
     parser.add_argument("--ws-max-size", type=int, default=10 * 1024 * 1024,

@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -113,6 +114,11 @@ def test_cli_defaults_disable_speaker_and_bound_partial_window():
     assert args.partial_window_sec == 15.0
     assert args.endpoint_mode == "server"
     assert args.log_session_stats_interval == 0.0
+    assert args.decode_batch_wait_ms == 10.0
+    assert args.decode_max_batch_size == 16
+    assert args.log_decode_profile is False
+    assert args.vad_device == "cpu"
+    assert args.vad_ncpu == 1
 
 
 def test_cli_accepts_client_endpoint_mode():
@@ -163,6 +169,16 @@ def test_websocket_keepalive_kwargs_can_disable_ping():
 
     kwargs = module.build_websocket_serve_kwargs(args)
     assert kwargs["ping_interval"] is None
+    assert kwargs["ping_timeout"] is None
+
+
+def test_websocket_defaults_keep_pings_without_a_compute_timeout():
+    module = load_service_module()
+
+    args = module.build_arg_parser().parse_args([])
+
+    kwargs = module.build_websocket_serve_kwargs(args)
+    assert kwargs["ping_interval"] == 20.0
     assert kwargs["ping_timeout"] is None
 
 
@@ -474,6 +490,257 @@ def test_completed_segment_keeps_aligned_partial_when_final_is_truncated_prefix(
         {"text": partial, "start": 0, "end": 2000}
     ]
     assert session.last_partial_text == ""
+
+
+def make_reported_long_segment_reconciliation_session(module, partial, partial_end_ms):
+    session = module.RealtimeASRSession(
+        FixedTextEngine(""),
+        {},
+        ControllableVad(),
+        sample_rate=16000,
+        chunk_ms=960,
+    )
+    session.last_partial_text = partial
+    session.last_partial_start_ms = 2920
+    session.last_partial_end_ms = partial_end_ms
+    session.last_partial_eligible = True
+    session.segment_partial_observation_count = 2
+    session.segment_best_partial_text = partial
+    session.segment_best_partial_start_ms = 2920
+    session.segment_best_partial_end_ms = partial_end_ms
+    session.segment_best_partial_observation_count = 2
+    return session
+
+
+def test_long_segment_recovers_when_final_regresses_after_shared_prefix():
+    module = load_service_module()
+    partial = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，OK OK，好嘞，胡总各位长官。"
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=13500
+    )
+
+    text = session._reconcile_completed_segment_text(
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎。好，拜",
+        [2920, 14420],
+        decode_succeeded=True,
+    )
+
+    assert text == partial
+
+
+def test_long_segment_recovers_from_catastrophically_short_final():
+    module = load_service_module()
+    partial = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，O K O K，好嘞，胡总各位长官。"
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=13500
+    )
+
+    text = session._reconcile_completed_segment_text(
+        "哇，嘿",
+        [2920, 14000],
+        decode_succeeded=True,
+    )
+
+    assert text == partial
+
+
+def test_long_segment_recovers_from_single_character_final():
+    module = load_service_module()
+    partial = (
+        "哎，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "胡总，各位长官。"
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=35328
+    )
+
+    text = session._reconcile_completed_segment_text(
+        "哎",
+        [2920, 36260],
+        decode_succeeded=True,
+    )
+
+    assert text == partial
+
+
+def test_long_segment_recovers_when_an_early_partial_correction_hides_tail_regression():
+    module = load_service_module()
+    partial = (
+        "哇，哎，不好意思，上午杭高雄的交通比较混乱一点，我们不晓得我们有点。"
+        "哎，好嘞，胡总各位长官。"
+    )
+    final = (
+        "哇，不好意思，上午高雄的交通比较混乱一点，我们不晓得我们有点。"
+        "哎，好嘞，"
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=14336
+    )
+
+    text = session._reconcile_completed_segment_text(
+        final,
+        [2920, 14420],
+        decode_succeeded=True,
+    )
+
+    assert text == partial
+
+
+def test_long_segment_keeps_distinct_short_final_without_prefix_alignment():
+    module = load_service_module()
+    partial = "会议取消，稍后另行通知，请各位等待后续的完整安排和确认消息。"
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=13500
+    )
+
+    text = session._reconcile_completed_segment_text(
+        "项目批准",
+        [2920, 14000],
+        decode_succeeded=True,
+    )
+
+    assert text == "项目批准"
+
+
+def test_long_segment_does_not_trust_a_single_regressed_partial_observation():
+    module = load_service_module()
+    partial = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，OK OK，好嘞，胡总各位长官。"
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, partial, partial_end_ms=13500
+    )
+    session.segment_partial_observation_count = 1
+    final = "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎。好，拜"
+
+    text = session._reconcile_completed_segment_text(
+        final,
+        [2920, 14420],
+        decode_succeeded=True,
+    )
+
+    assert text == final
+
+
+def test_long_segment_can_recover_the_best_earlier_partial():
+    module = load_service_module()
+    best_partial = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎，"
+        "OK OK OK。"
+    )
+    final = "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎。好，拜"
+    session = make_reported_long_segment_reconciliation_session(
+        module, final, partial_end_ms=13500
+    )
+    session.segment_partial_observation_count = 10
+    session.segment_best_partial_text = best_partial
+    session.segment_best_partial_start_ms = 2920
+    session.segment_best_partial_end_ms = 12500
+    session.segment_best_partial_observation_count = 10
+
+    text = session._reconcile_completed_segment_text(
+        final,
+        [2920, 14420],
+        decode_succeeded=True,
+    )
+
+    assert text == best_partial
+
+
+def test_long_segment_keeps_clean_history_after_a_hallucinated_partial():
+    module = load_service_module()
+    best_partial = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，OK OK，好嘞，胡总各位长官。"
+    )
+    final = "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎。好，拜"
+    session = make_reported_long_segment_reconciliation_session(
+        module, best_partial, partial_end_ms=13500
+    )
+    session.segment_best_partial_observation_count = 8
+
+    session.last_partial_text = final
+    session.last_partial_start_ms = 2920
+    session.last_partial_end_ms = 13500
+    session.last_partial_eligible = False
+    session._reset_partial_history(preserve_best=True)
+
+    text = session._reconcile_completed_segment_text(
+        final,
+        [2920, 14420],
+        decode_succeeded=True,
+    )
+
+    assert text == best_partial
+
+
+def test_retry_extension_requires_a_longer_aligned_clean_transcript():
+    module = load_service_module()
+    fallback = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎，"
+        "OK OK OK。"
+    )
+    extension = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，OK OK，好嘞，胡总各位长官。"
+    )
+
+    assert module._is_supported_transcript_extension(extension, fallback) is True
+    assert module._is_supported_transcript_extension("完全不同的较长结果文本", fallback) is False
+    assert module._is_supported_transcript_extension("哇，不好意思。", fallback) is False
+
+
+def test_completed_segment_retries_only_after_a_supported_regression():
+    module = load_service_module()
+    fallback = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎，"
+        "OK OK OK。"
+    )
+    extension = (
+        "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点。"
+        "哎，OK OK，好嘞，胡总各位长官。"
+    )
+    engine = ScriptedTextEngine(
+        [
+            "哇，不好意思，上午高雄交通比较混乱一点，我们不晓得我们有点哎。好，拜",
+            extension,
+        ]
+    )
+    session = make_reported_long_segment_reconciliation_session(
+        module, fallback, partial_end_ms=13500
+    )
+    session.vllm_engine = engine
+    session.total_samples = int(14.42 * session.sample_rate)
+    session.audio_buffer = np.zeros(session.total_samples, dtype=np.float32)
+
+    text = session._decode_segment([2920, 14420])
+
+    assert text == extension
+    assert len(engine.generate_kwargs) == 2
+
+
+def test_completed_segment_does_not_retry_a_normal_final():
+    module = load_service_module()
+    final = "感谢各位今天参加会议，后续安排将在明天正式通知。"
+    engine = ScriptedTextEngine([final])
+    session = make_reported_long_segment_reconciliation_session(
+        module, "感谢各位今天参加会以。", partial_end_ms=13500
+    )
+    session.vllm_engine = engine
+    session.total_samples = int(14.42 * session.sample_rate)
+    session.audio_buffer = np.zeros(session.total_samples, dtype=np.float32)
+
+    text = session._decode_segment([2920, 14420])
+
+    assert text == final
+    assert len(engine.generate_kwargs) == 1
 
 
 def test_completed_segment_keeps_clean_aligned_partial_when_final_hallucinates():
@@ -1628,7 +1895,431 @@ def test_speaker_history_and_identity_state_have_hard_limits(monkeypatch):
     ]
 
 
-def test_handler_keeps_event_loop_responsive_during_session_work(monkeypatch):
+def test_realtime_batching_engine_combines_compatible_concurrent_requests():
+    module = load_service_module()
+
+    class RecordingEngine:
+        def __init__(self):
+            self.calls = []
+            self._engine = object()
+
+        def generate(self, inputs, **kwargs):
+            self.calls.append((list(inputs), dict(kwargs)))
+            return [{"text": str(int(item[0]))} for item in inputs]
+
+    engine = RecordingEngine()
+    batching_engine = module.RealtimeBatchingEngine(
+        engine, batch_wait_ms=50, max_batch_size=8
+    )
+    assert batching_engine._engine is engine._engine
+    barrier = threading.Barrier(3)
+    results = [None, None]
+
+    def generate(index, values):
+        barrier.wait()
+        results[index] = batching_engine.generate(
+            [np.array([value], dtype=np.float32) for value in values],
+            language="zh",
+        )
+
+    threads = [
+        threading.Thread(target=generate, args=(0, [1, 2])),
+        threading.Thread(target=generate, args=(1, [3])),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [[item["text"] for item in result] for result in results] == [
+        ["1", "2"],
+        ["3"],
+    ]
+    assert len(engine.calls) == 1
+    assert len(engine.calls[0][0]) == 3
+    assert engine.calls[0][1] == {"language": "zh"}
+
+
+def test_realtime_batching_engine_logs_opt_in_decode_profile(caplog):
+    module = load_service_module()
+
+    class RecordingEngine:
+        def generate(self, inputs, **kwargs):
+            return [{"text": "ok"} for _ in inputs]
+
+    caplog.set_level("INFO")
+    batching_engine = module.RealtimeBatchingEngine(
+        RecordingEngine(), batch_wait_ms=0, max_batch_size=8, log_profile=True
+    )
+
+    result = batching_engine.generate(
+        [
+            np.zeros(16000, dtype=np.float32),
+            np.zeros(32000, dtype=np.float32),
+        ]
+    )
+
+    assert result == [{"text": "ok"}, {"text": "ok"}]
+    assert "Realtime decode profile:" in caplog.text
+    assert "requests=1" in caplog.text
+    assert "samples=2" in caplog.text
+    assert "audio_sec_total=3.000" in caplog.text
+    assert "audio_sec_min=1.000" in caplog.text
+    assert "audio_sec_max=2.000" in caplog.text
+    assert "queue_ms_p50=" in caplog.text
+    assert "queue_ms_max=" in caplog.text
+    assert "engine_ms=" in caplog.text
+
+
+def test_realtime_batching_engine_keeps_incompatible_options_separate():
+    module = load_service_module()
+
+    class RecordingEngine:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, inputs, **kwargs):
+            self.calls.append((list(inputs), dict(kwargs)))
+            return [{"text": kwargs["language"]} for _ in inputs]
+
+    engine = RecordingEngine()
+    batching_engine = module.RealtimeBatchingEngine(
+        engine, batch_wait_ms=50, max_batch_size=8
+    )
+    barrier = threading.Barrier(3)
+    results = [None, None]
+
+    def generate(index, language):
+        barrier.wait()
+        results[index] = batching_engine.generate(
+            [np.array([index], dtype=np.float32)], language=language
+        )
+
+    threads = [
+        threading.Thread(target=generate, args=(0, "zh")),
+        threading.Thread(target=generate, args=(1, "en")),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [result[0]["text"] for result in results] == ["zh", "en"]
+    assert len(engine.calls) == 2
+
+
+def test_realtime_batching_engine_propagates_engine_errors():
+    module = load_service_module()
+
+    class FailingEngine:
+        def generate(self, inputs, **kwargs):
+            raise RuntimeError("synthetic batch failure")
+
+    batching_engine = module.RealtimeBatchingEngine(
+        FailingEngine(), batch_wait_ms=0, max_batch_size=8
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic batch failure"):
+        batching_engine.generate([np.array([1], dtype=np.float32)])
+
+
+def test_realtime_batching_engine_recovers_from_request_grouping_error():
+    module = load_service_module()
+
+    class ExplodingHash:
+        def __hash__(self):
+            raise RuntimeError("synthetic grouping failure")
+
+    class RecordingEngine:
+        def generate(self, inputs, **kwargs):
+            return [{"text": "ok"} for _ in inputs]
+
+    batching_engine = module.RealtimeBatchingEngine(
+        RecordingEngine(), batch_wait_ms=10, max_batch_size=8
+    )
+    outcomes = {}
+
+    def generate(name, marker):
+        try:
+            outcomes[name] = batching_engine.generate(
+                [np.array([1], dtype=np.float32)], marker=marker
+            )
+        except Exception as error:
+            outcomes[name] = error
+
+    bad_thread = threading.Thread(
+        target=generate, args=("bad", ExplodingHash()), daemon=True
+    )
+    bad_thread.start()
+    bad_thread.join(timeout=2)
+    good_thread = threading.Thread(target=generate, args=("good", "safe"), daemon=True)
+    good_thread.start()
+    good_thread.join(timeout=2)
+
+    assert not bad_thread.is_alive()
+    assert not good_thread.is_alive()
+    assert isinstance(outcomes["bad"], RuntimeError)
+    assert "synthetic grouping failure" in str(outcomes["bad"])
+    assert outcomes["good"] == [{"text": "ok"}]
+
+
+def test_realtime_batching_engine_recovers_from_result_distribution_error():
+    module = load_service_module()
+
+    class ExplodingResult(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("synthetic distribution failure")
+
+    class SelectiveEngine:
+        def generate(self, inputs, **kwargs):
+            if int(inputs[0][0]) < 0:
+                return [ExplodingResult(text="bad")]
+            return [{"key": None, "text": "ok"}]
+
+    batching_engine = module.RealtimeBatchingEngine(
+        SelectiveEngine(), batch_wait_ms=0, max_batch_size=8
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic distribution failure"):
+        batching_engine.generate([np.array([-1], dtype=np.float32)])
+
+    assert batching_engine.generate([np.array([1], dtype=np.float32)]) == [
+        {"key": None, "text": "ok"}
+    ]
+
+
+def test_realtime_batching_engine_enforces_max_batch_size_between_requests():
+    module = load_service_module()
+
+    class RecordingEngine:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, inputs, **kwargs):
+            self.calls.append(list(inputs))
+            return [{"text": str(int(item[0]))} for item in inputs]
+
+    engine = RecordingEngine()
+    batching_engine = module.RealtimeBatchingEngine(
+        engine, batch_wait_ms=50, max_batch_size=3
+    )
+    barrier = threading.Barrier(3)
+    results = [None, None]
+
+    def generate(index, values):
+        barrier.wait()
+        results[index] = batching_engine.generate(
+            [np.array([value], dtype=np.float32) for value in values]
+        )
+
+    threads = [
+        threading.Thread(target=generate, args=(0, [1, 2])),
+        threading.Thread(target=generate, args=(1, [3, 4])),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [[item["text"] for item in result] for result in results] == [
+        ["1", "2"],
+        ["3", "4"],
+    ]
+    assert len(engine.calls) == 2
+    assert all(len(call) <= 3 for call in engine.calls)
+
+
+def test_realtime_batching_engine_rejects_request_larger_than_max_batch_size():
+    module = load_service_module()
+
+    class RecordingEngine:
+        def generate(self, inputs, **kwargs):
+            raise AssertionError("oversized request must not reach the engine")
+
+    batching_engine = module.RealtimeBatchingEngine(
+        RecordingEngine(), batch_wait_ms=0, max_batch_size=1
+    )
+
+    with pytest.raises(ValueError, match="2 inputs.*maximum is 1"):
+        batching_engine.generate(
+            [np.array([1], dtype=np.float32), np.array([2], dtype=np.float32)]
+        )
+
+
+def test_realtime_batching_engine_isolates_a_bad_request_after_batch_failure():
+    module = load_service_module()
+
+    class SelectiveEngine:
+        def generate(self, inputs, **kwargs):
+            values = [int(item[0]) for item in inputs]
+            if len(values) > 1:
+                raise RuntimeError("synthetic batch failure")
+            if values[0] < 0:
+                raise ValueError("bad audio")
+            return [{"key": "sample_0", "text": str(values[0])}]
+
+    batching_engine = module.RealtimeBatchingEngine(
+        SelectiveEngine(), batch_wait_ms=50, max_batch_size=8
+    )
+    barrier = threading.Barrier(3)
+    outcomes = [None, None]
+
+    def generate(index, value):
+        barrier.wait()
+        try:
+            outcomes[index] = batching_engine.generate(
+                [np.array([value], dtype=np.float32)]
+            )
+        except Exception as error:
+            outcomes[index] = error
+
+    threads = [
+        threading.Thread(target=generate, args=(0, -1)),
+        threading.Thread(target=generate, args=(1, 7)),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert isinstance(outcomes[0], ValueError)
+    assert str(outcomes[0]) == "bad audio"
+    assert outcomes[1] == [{"key": "sample_0", "text": "7"}]
+
+
+def test_thread_safe_generate_model_serializes_shared_model_calls():
+    module = load_service_module()
+
+    class RecordingModel:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def generate(self, value):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.05)
+                return value
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    model = RecordingModel()
+    shared_model = module.ThreadSafeGenerateModel(model)
+    threads = [
+        threading.Thread(target=shared_model.generate, args=(index,))
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert model.max_active == 1
+    assert shared_model.active == 0
+
+
+def test_create_vad_shares_weights_but_copies_runtime_config(monkeypatch):
+    module = load_service_module()
+
+    class NestedVadModel:
+        def __init__(self):
+            self.encoder = object()
+            self.vad_opts = types.SimpleNamespace(max_end_silence_time=800)
+
+    class FakeAutoModel:
+        _IMMUTABLE_KWARGS_KEYS = frozenset({"frontend"})
+
+        def __init__(self):
+            self.model = NestedVadModel()
+            self.frontend = object()
+            self.kwargs = {"frontend": self.frontend, "runtime": {"items": []}}
+            self._base_kwargs_map = {"kwargs": dict(self.kwargs)}
+
+    monkeypatch.setattr(module, "DynamicStreamingVAD", lambda value: value)
+    model = FakeAutoModel()
+    args = types.SimpleNamespace(endpoint_mode="server")
+
+    first = module.create_vad(model, args)
+    second = module.create_vad(model, args)
+
+    assert first is not model
+    assert second is not model
+    assert first is not second
+    assert first.model is not model.model
+    assert second.model is not model.model
+    assert first.model is not second.model
+    assert first.model.encoder is model.model.encoder
+    assert second.model.encoder is model.model.encoder
+    assert first.model.vad_opts is not second.model.vad_opts
+    assert first.kwargs is not second.kwargs
+    assert first.kwargs["frontend"] is model.frontend
+    first.kwargs["runtime"]["items"].append("first")
+    assert second.kwargs["runtime"]["items"] == []
+
+
+def test_create_vad_isolates_concurrent_nested_model_runtime_state(monkeypatch):
+    module = load_service_module()
+    barrier = threading.Barrier(2)
+
+    class NestedVadModel:
+        def __init__(self):
+            self.encoder = object()
+            self.vad_opts = types.SimpleNamespace(max_end_silence_time=800)
+
+        def initialize(self, value):
+            self.vad_opts.max_end_silence_time = value
+            barrier.wait()
+            return self.vad_opts.max_end_silence_time
+
+    class FakeAutoModel:
+        _IMMUTABLE_KWARGS_KEYS = frozenset()
+
+        def __init__(self):
+            self.model = NestedVadModel()
+            self.kwargs = {}
+
+        def generate(self, value):
+            return self.model.initialize(value)
+
+    monkeypatch.setattr(module, "DynamicStreamingVAD", lambda value: value)
+    model = FakeAutoModel()
+    args = types.SimpleNamespace(endpoint_mode="server")
+    sessions = [module.create_vad(model, args), module.create_vad(model, args)]
+    results = [None, None]
+    threads = [
+        threading.Thread(
+            target=lambda index=index: results.__setitem__(
+                index, sessions[index].generate(index + 1)
+            )
+        )
+        for index in range(2)
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [1, 2]
+
+
+def test_handler_keeps_event_loop_responsive_and_runs_connections_concurrently(
+    monkeypatch,
+):
     module = load_service_module()
 
     class BlockingSession:
@@ -1712,7 +2403,7 @@ def test_handler_keeps_event_loop_responsive_during_session_work(monkeypatch):
 
     assert gaps
     assert max(gaps) < 0.08
-    assert BlockingSession.max_active_workers == 1
+    assert BlockingSession.max_active_workers == 2
 
 
 def test_handler_logs_session_stats_on_configured_interval(monkeypatch):

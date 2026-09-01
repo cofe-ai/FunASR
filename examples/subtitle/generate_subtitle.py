@@ -14,6 +14,8 @@ import sys
 import os
 import re
 
+from funasr.cli import _sentence_timestamp_words, merge_subtitle_segments
+
 
 def clean_text(text):
     return re.sub(r'<\|[^|]*\|>', '', text or "").strip()
@@ -63,6 +65,12 @@ def main():
     parser.add_argument("input", help="Audio/video file path")
     parser.add_argument("-o", "--output", help="Output file (default: input.srt)")
     parser.add_argument("--format", choices=["srt", "vtt"], default="srt")
+    parser.add_argument(
+        "--segment-mode",
+        choices=["readable", "sentence"],
+        default="readable",
+        help="Cue grouping: readable (default) or raw model sentence boundaries",
+    )
     parser.add_argument("--model", default="iic/SenseVoiceSmall")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--spk", action="store_true", help="Include speaker labels")
@@ -104,12 +112,22 @@ def main():
 
     segments = []
     result_item = result[0]
-    for seg in result_item.get("sentence_info", []) or []:
+    sentence_words = _sentence_timestamp_words(result_item)
+    for index, seg in enumerate(result_item.get("sentence_info", []) or []):
         text = clean_text(seg.get("sentence") or seg.get("text", ""))
         start = int(seg.get("start", 0) or 0)
         end = int(seg.get("end", 0) or 0)
         if text and end > start:
-            segments.append({"start": start, "end": end, "text": text, "spk": seg.get("spk")})
+            item = {
+                "start": start,
+                "end": end,
+                "text": text,
+                "spk": seg.get("spk"),
+                "timestamp": seg.get("timestamp") or seg.get("timestamps"),
+            }
+            if sentence_words[index]:
+                item["words"] = sentence_words[index]
+            segments.append(item)
 
     if not segments:
         text = clean_text(result_item.get("text", ""))
@@ -120,6 +138,9 @@ def main():
     if not segments:
         print("No speech detected.")
         sys.exit(0)
+
+    if args.segment_mode == "readable":
+        segments = merge_subtitle_segments(segments)
 
     fmt = format_time_srt if args.format == "srt" else format_time_vtt
     with open(output_path, "w", encoding="utf-8") as f:

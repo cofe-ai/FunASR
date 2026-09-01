@@ -149,42 +149,12 @@ Whisper 是单个模型，**FunASR 是一个工具箱**——按场景挑模型�
 
 ## 最新动态
 
-- 2026/08/14：**v1.4.2 已发布到 PyPI** — 标点模型的 token 边界落在带时间戳的 ASR 词内部时，句子对齐现在仍能保留正确的字幕分段。分布式训练会在每个梯度累积窗口的最后一个 microbatch 同步 DDP/FSDP 梯度，并从解析后的配置正确初始化 DeepSpeed/FSDP 模式。对应 GitHub 源码 tag 同时包含 llama.cpp SRT 输出和 v0.2.0 AMD Vulkan submission 更新。安装命令：`python -m pip install -U "funasr==1.4.2"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.4.2)
-- 2026/08/11：**llama.cpp runtime v0.2.0** — 统一固定上游 llama.cpp 到 `803b7fca`，通过同一套测试工作流发布 9 个带 SHA-256 校验值的 Linux、macOS 与 Windows 压缩包。Fun-ASR-Nano、SenseVoice 和 Paraformer CLI 现在可直接输出 SRT 字幕；Vulkan 启动会给出可操作的 AMD 诊断信息和 CPU fallback。AMD Windows Vulkan 崩溃修复仍等待 issue 报告者在原硬件上确认。[下载矩阵与快速开始 →](https://www.funasr.com/deploy/llama-cpp.html) · [发布页 →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.2.0)
-- 2026/08/04：**v1.4.1 已发布到 PyPI** — Hugging Face 的 `paraformer-en` 别名现在会解析到官方英文 checkpoint，不再静默下载中文模型。本补丁还包含 Fun-ASR-Nano LoRA 微调与更安全的 checkpoint 处理；对应 GitHub 源码 tag 同时提供 JSONL 时间戳输出、SenseVoice TensorRT 部署和 OpenClaw 实时转写集成。安装命令：`python -m pip install -U "funasr==1.4.1"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.4.1)
-- 2026/08/04：**OpenClaw 实时转写集成** — 新增 [`openclaw-funasr`](integrations/openclaw/) 源码包，把私有部署的 FunASR `online`、`offline` 与 `2pass` WebSocket 识别接入 OpenClaw Talk 和 Voice Call。8 kHz G.711 mu-law 转换、60 ms 分帧、partial/final 文本、重连上限、安装包与运行时注册均已基于 OpenClaw `2026.7.2` 验证；npm 与 ClawHub 发布将在所需的[上游 SDK 改动](https://github.com/openclaw/openclaw/pull/118977)合入后进行。
-- 2026/07/31：**v1.4.0 已发布到 PyPI** — `AutoModel` 现在会在下载模型前拒绝常见的 `vda_model` 误拼写并明确提示使用 `vad_model`，避免依赖 VAD 的分段、说话人处理和 `sentence_info` 被静默关闭。GitHub 源码发布同时更新 legacy WebSocket 文件运行时：客户端会等待明确的输入结束确认，服务端先刷新待处理的 offline、online 与 2pass 音频，并把收尾失败返回给客户端。Python 包安装命令：`python -m pip install -U "funasr==1.4.0"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.4.0)
-- 2026/07/27：**v1.3.30 已发布到 PyPI** — WAV、MP3、FLAC、OGG、MP4/M4A 和 WebM 等容器格式的音频字节现在会通过对应编解码器解码，不再被误当作原始 PCM。OpenAI 兼容响应会保留说话人标签，标点不匹配时仍保留 VAD 分句时间，受信任的浏览器客户端可按需启用 CORS，vLLM 的 VAD 分段上限为 30 秒。GitHub 发布页还同时提供覆盖九种桌面和服务器目标的当前 llama.cpp 预编译运行包。安装命令：`python -m pip install -U "funasr==1.3.30"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.30)
-- 2026/07/24：**v1.3.29 热修复已发布到 PyPI** — SenseVoice 长音频在没有词级时间戳和标点模型时，现在会通过 `sentence_info` 返回每个 VAD 语音片段。字幕客户端可直接获得识别文本及真实的毫秒级起止时间，不再退化为零时长或覆盖整段媒体的单条字幕。安装命令：`python -m pip install -U "funasr==1.3.29"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.29)
-- 2026/07/24：**v1.3.28 热修复已发布到 PyPI** — 实时 WebSocket 在 VAD 锁句结果退化为短前缀、重复幻觉或解码异常时，会保留连续且完整覆盖当前语音段的干净 partial；短音频 STOP、VAD 收尾和说话人结束现在统一走可靠的完成路径。SenseVoice 字幕分句也会正确对齐富标签、标点与词/BPE 时间戳，不再把中文压成一个字幕块，也不会破坏英文原文。安装命令：`python -m pip install -U "funasr==1.3.28"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.28)
-- 2026/07/24：**v1.3.27 已发布到 PyPI** — OpenAI 兼容服务现在会在 `verbose_json` 中返回 SenseVoice 检测到的语言，并在 vLLM 降级后复用已缓存的 Fun-ASR-Nano `AutoModel`。当 vLLM/VAD 初始化及其 fallback 均失败时，不会残留半初始化的 engine 状态，后续请求可以重试。安装命令：`python -m pip install -U "funasr==1.3.27"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.27)
-- 2026/07/23：**llama.cpp runtime v0.1.9** — 新增独立的 Windows Vulkan 包 `funasr-llamacpp-windows-x64-vulkan.zip`，支持在安装当前 AMD、Intel 或 NVIDIA Vulkan 驱动的 Windows 机器上运行 SenseVoiceSmall；Linux Vulkan、Windows CUDA、CPU/AVX2、Linux arm64 和 macOS arm64 包继续提供。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.1.9)
-- 2026/07/23：**v1.3.26 已发布到 PyPI** — `funasr-server --model fun-asr-nano --hub ms` 现在会在默认 Fun-ASR-Nano 的 vLLM 路径和 AutoModel fallback 路径中都尊重 ModelScope hub 选择，避免用户指定 ModelScope 时仍误走 Hugging Face 下载。安装命令：`python -m pip install -U "funasr==1.3.26"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.26)
-- 2026/07/23：**v1.3.25 已发布到 PyPI** — 实时 WebSocket 服务新增 `POSTPROCESS_HOTWORDS:错词=>正确词` 与 `--postprocess-hotword-file`，可在 final 文本阶段做确定性热词纠正，避免把固定错词修正误用成模型层 `HOTWORDS:` 解码偏置；源码目录下的实时服务入口也可直接运行。安装命令：`python -m pip install -U "funasr==1.3.25"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.25)
-- 2026/07/23：**v1.3.24 已发布到 PyPI** — OpenAI 兼容服务现在支持自定义模型路径和 hub 选择，llama.cpp/GGUF 文档补充 HTTP 转写 wrapper 与 Linux Vulkan 包，公开文档链接也已刷新，便于新用户顺利上手。安装命令：`python -m pip install -U "funasr==1.3.24"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.24)
-- 2026/07/19：**v1.3.22 已发布到 PyPI** — `funasr-server` 现在会为 SenseVoice/Paraformer fallback 的纯文本结果补齐 OpenAI 兼容 `verbose_json.segments`，避免字幕类客户端在 `text` 已有内容时仍拿到空 `segments` 数组。安装命令：`python -m pip install -U "funasr==1.3.22"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.22)
-- 2026/07/19：**v1.3.21 已发布到 PyPI** — 修复全新环境里先安装 `funasr`、尚未选择平台对应 PyTorch 版本时的首次导入阻塞。现在 `import funasr` 和 `funasr.__version__` 不再因为缺少 torch 失败；真正访问 `AutoModel` 时仍会要求安装 PyTorch，并给出明确安装提示。安装命令：`python -m pip install -U "funasr==1.3.21"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.21)
-- 2026/07/19：**v1.3.20 已发布到 PyPI** — PyPI 项目页和安装引导已同步到当前 FunASR 文档、社区集成列表，以及 Fun-ASR-Nano 部署路径中带引号的 `python -m pip install -U "funasr>=1.3.19"` 命令。本版本是文档/打包元数据同步，运行时代码与 v1.3.19 保持一致。安装命令：`python -m pip install -U "funasr==1.3.20"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.20)
-- 2026/07/19：**v1.3.19 已发布到 PyPI** — 实时 WebSocket 长会话排障文档已随包发布。启动服务时加上 `--enable-spk --log-session-stats-interval 30`，如果仍遇到断连或内存增长，请在 issue 中附上输出的 `Session stats:` 日志。安装命令：`python -m pip install -U "funasr==1.3.19"`。[长会话诊断 →](docs/vllm_guide_zh.md#长会话诊断) · [发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.19)
-- 2026/07/19：**v1.3.18 已发布到 PyPI** — CLI 的 SRT/TSV 字幕输出现在会请求句级时间戳，并在需要时加载标点模型；`funasr audio.wav --output-format srt --output-dir ./subs` 会输出分句字幕，不再退化成一个全文字幕块。安装命令：`python -m pip install -U "funasr==1.3.18"`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/v1.3.18)
-- 2026/07/18：**v1.3.16 已发布到 PyPI** — Fun-ASR-Nano 实时服务新增客户端分句模式。一个 WebSocket 会话可连续发送 PCM，并用 `COMMIT` 提交每个句子；无需加载服务端 VAD，短句可正常结束，多轮时间戳保持递增。执行 `pip install --upgrade funasr` 后，可用 `funasr-realtime-server --endpoint-mode client` 启动。[使用文档 →](examples/industrial_data_pretraining/fun_asr_nano/docs/realtime_demo.md)
-- 2026/07/22：**llama.cpp runtime v0.1.8** — 新增 Linux Vulkan 预编译包 `funasr-llamacpp-linux-x64-vulkan.tar.gz`，可在支持 Vulkan driver/ICD 的 Linux GPU 上运行 `llama-funasr-sensevoice ... --backend vulkan`；CPU、AVX2、macOS arm64、Windows CPU/AVX2、Windows CUDA 包继续保留。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.1.8)
-- 2026/07/18：**llama.cpp runtime v0.1.7** — 新增 SenseVoiceSmall 的 Windows CUDA 预编译包 `funasr-llamacpp-windows-x64-cuda.zip`，并保留 Linux / macOS / Windows CPU 包。下载 GGUF 模型后，可在支持的 NVIDIA GPU 上运行 `llama-funasr-sensevoice ... --backend cuda`。[发布页 →](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.1.7)
-- 2026/05/24：**vLLM 推理引擎** — Fun-ASR-Nano 解码加速 2-3 倍。支持流式 WebSocket 服务（VAD + 说话人分离 + 热词）。[文档 →](docs/vllm_guide_zh.md) · [实时 WS 调优 →](docs/vllm_guide_zh.md#67-生产并发与多进程部署) · [API 稳定性清单 →](docs/vllm_guide_zh.md#生产-api-稳定性清单)
-- 2026/05/24：**动态 VAD** — 自适应静音阈值（默认开启），短句不切碎、长句自动切分。[详情 →](docs/vllm_guide_zh.md#7-动态-vad)
-- 2026/05/24：**v1.3.3** — `funasr-server` 命令行工具、OpenAI 兼容 API、MCP 服务。`pip install --upgrade funasr`
-- 2026/05/20：新增 Qwen3-ASR (0.6B/1.7B)，52 种语言自动检测。[使用方法](examples/industrial_data_pretraining/qwen3_asr)
-- 2026/05/20：新增 GLM-ASR-Nano (1.5B)，17 种语言，方言优化。[使用方法](examples/industrial_data_pretraining/glm_asr)
-- 2026/05/19：Fun-ASR-Nano 和 SenseVoice 可与 VAD、CAM++ 组合为说话人分离 pipeline。
-- 2025/12/15：[Fun-ASR-Nano-2512](https://github.com/QwenAudio/Fun-ASR) 上线，支持中/英/日及中文方言。
+- **FunASR 1.4.11** 是当前 PyPI 稳定版，重点改善多语言可读字幕，并保留模型真实时间戳。升级命令：`python -m pip install -U "funasr==1.4.11"`。[发布页 ->](https://github.com/modelscope/FunASR/releases/tag/v1.4.11)
+- **MOSS-Transcribe-Diarize 已接入生态**：一次生成同时完成长音频转写、时间戳和匿名说话人标签，无需外挂 VAD 或说话人流水线。FunASR 支持本地 Transformers 及已有 vLLM/SGLang 服务，FunClip 可导出带说话人的 SRT 和片段。[部署指南 ->](./docs/moss_transcribe_diarize_zh.md)
+- **llama.cpp runtime v0.2.6** 提供覆盖 Linux、macOS、Windows 十种目标的已验证预编译包，并为 RTX 30/40 与 RTX 50 显卡分别提供 Windows CUDA 包。[下载矩阵 ->](https://www.funasr.com/deploy/llama-cpp.html)
+- **实时服务更快、更稳定**：兼容的 WebSocket 会话改为批处理，排队解码也不再默认误关健康连接。在 H100 回归负载下，12 路客户端 STOP p95 从 19.8 秒降至 0.4 秒。[生产部署指南 ->](./docs/vllm_guide_zh.md)
 
-<details><summary>更早</summary>
-
-- 2024/10/10：支持 Whisper-large-v3-turbo。
-- 2024/07/04：[SenseVoice](https://github.com/QwenAudio/SenseVoice) 发布。
-- 2024/01/30：FunASR 1.0 发布。
-
-</details>
+> 完整改动记录和可下载资产请查看 [GitHub Releases](https://github.com/modelscope/FunASR/releases)。
 
 ---
 
@@ -353,11 +323,13 @@ Vulkan driver/ICD 的机器上运行：
 
 Windows Vulkan ZIP 使用显卡驱动提供的系统 Vulkan loader，不需要另外安装 Vulkan SDK；当前与 Linux Vulkan 包一样，仅加速 SenseVoiceSmall。
 
-当前 Windows CUDA 包面向 CUDA architecture 86。RTX 50 / Blackwell GPU 会报告
-compute capability 12.0（`sm_120`），在专用 CUDA 产物发布前，请使用 CPU 包，或从
-源码构建并设置 `-DCMAKE_CUDA_ARCHITECTURES=120`。
+带 tag 的发布提供两个 Windows CUDA 包：标准 `windows-x64-cuda` ZIP 面向 CUDA
+architecture 86，`windows-x64-cuda-blackwell` 面向 RTX 50 / Blackwell 的 architecture
+120（`sm_120`）。两个 ZIP 都包含所需的 cuBLAS DLL，并使用静态 MSVC runtime；用户只需
+安装兼容的 NVIDIA 驱动，无需另装 CUDA Toolkit。CI 验证架构与打包边界，但不代表已经在
+Blackwell 实机上完成推理验证。
 
-**预编译二进制：** [Releases](https://github.com/modelscope/FunASR/releases) · [v0.2.0](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.2.0) · [Linux Vulkan tarball](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.0/funasr-llamacpp-linux-x64-vulkan.tar.gz) · [Windows Vulkan zip](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.0/funasr-llamacpp-windows-x64-vulkan.zip) · [Windows CUDA zip](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.0/funasr-llamacpp-windows-x64-cuda.zip) · **下载与快速开始：** [funasr.com/deploy/llama-cpp](https://www.funasr.com/deploy/llama-cpp.html) · **GGUF 模型：** [Hugging Face](https://huggingface.co/FunAudioLLM) · **文档与评测：** [runtime/llama.cpp/](./runtime/llama.cpp/)
+**预编译二进制：** [Releases](https://github.com/modelscope/FunASR/releases) · [v0.2.6](https://github.com/modelscope/FunASR/releases/tag/runtime-llamacpp-v0.2.6) · [Linux Vulkan tarball](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.6/funasr-llamacpp-linux-x64-vulkan.tar.gz) · [Windows Vulkan zip](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.6/funasr-llamacpp-windows-x64-vulkan.zip) · [Windows CUDA zip](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.6/funasr-llamacpp-windows-x64-cuda.zip) · [Windows Blackwell CUDA zip](https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.2.6/funasr-llamacpp-windows-x64-cuda-blackwell.zip) · **下载与快速开始：** [funasr.com/deploy/llama-cpp](https://www.funasr.com/deploy/llama-cpp.html) · **GGUF 模型：** [Hugging Face](https://huggingface.co/FunAudioLLM) · **文档与评测：** [runtime/llama.cpp/](./runtime/llama.cpp/)
 
 [OpenAI API 示例 →](./examples/openai_api/README_zh.md) · [Gradio Demo →](./examples/openai_api/GRADIO_zh.md) · [客户端配方 →](./examples/openai_api/CLIENTS.md) · [JavaScript/TypeScript 配方 →](./examples/openai_api/JAVASCRIPT_zh.md) · [Kubernetes 模板 →](./examples/openai_api/kubernetes/README_zh.md) · [工作流配方 →](./examples/openai_api/WORKFLOWS_zh.md) · [Postman 集合 →](./examples/openai_api/POSTMAN_zh.md) · [OpenAPI 规范 →](./examples/openai_api/OPENAPI_zh.md) · [安全指南 →](./examples/openai_api/SECURITY_zh.md) · [部署选型 →](./docs/deployment_matrix_zh.md) · [部署文档 →](./runtime/readme_cn.md) · [Agent 集成 →](https://modelscope.github.io/FunASR/agent.html)
 
